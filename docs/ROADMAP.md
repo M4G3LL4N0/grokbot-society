@@ -46,7 +46,7 @@
 - [x] Demo entrypoint (`pnpm dev`)
 
 ### Verification
-- [x] 42 tests across 8 files (14 required proofs + architectural guarantees + domain proofs + Society MVP)
+- [x] 98 tests across 11 files (14 required proofs + architectural guarantees + domain proofs + Society MVP + God bridge + offload contract + benchmarks)
 - [x] `pnpm typecheck` clean (strict TS, noUncheckedIndexedAccess)
 - [x] Zero-cost MockProvider operation verified
 

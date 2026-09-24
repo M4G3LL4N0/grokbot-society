@@ -224,11 +224,60 @@ CACHE → STATE → DETERMINISTIC → DB/SCRIPT → CHEAP → CHATGPT → GROK
 
 ---
 
+## God v2 bridge — one fresh GrokBot, measured
+
+ONE external God GrokBot renders MANY synthetic Persons. The Persons, roles,
+relationships, circles and memories stay in SQLite; God is computational,
+disposable, and rehydrated from a bounded context slice each time.
+
+```text
+USER → God → tiny event → Society → bounded GodInput → God → structured deltas → Society state
+```
+
+```bash
+pnpm society god health                          # bridge state + hard limits
+pnpm society god submit '{"type":"USER_MESSAGE","text":"What is everyone doing tonight?"}' --bridge
+pnpm society god context <eventId>               # audit the bounded slice
+pnpm society god result '<resultJson>'           # structured deltas → persistent state
+pnpm society god usage                           # cost-per-social-value metrics
+pnpm society god benchmarks                      # scenarios A–F, all dry ($0.00)
+pnpm society god compare A                       # route cost/quality comparison
+```
+
+**Hard limits (enforced, not advisory):** 1 call per event · recursion 0 ·
+background calls 0 · retries 0 · ≤3 active speakers · proactive paid inference
+off · background life simulation off.
+
+**Zero-Grok operation is preserved.** With the bridge off (the default) the
+whole society runs on `social.mock` at $0.00. God is an enhancement, never a
+dependency.
+
+**Cost visibility:** every external call records why it happened, who was
+included, exact tokens, model, provider, cost, latency, state changes, and
+offline miss-analysis signals — so "could this have been cheaper?" is answerable
+later without spending another call.
+
+**Measured (dry, `pnpm society god benchmarks`):**
+
+| scenario | persons | calls | max context | cost |
+| --- | --- | --- | --- | --- |
+| A one person | 5 | 1 | ~1.2k tok | $0.00 |
+| B three-person circle | 5 | 1 | ~1.2k tok | $0.00 |
+| C ten-person circle | 15 | 1 | ~0.2k tok | $0.00 |
+| D 1,000-person society | 1,015 | 1 | ~1.2k tok | $0.00 |
+| E 10-message conversation | 1,015 | 10 | ~1.2k tok | $0.00 |
+| F 30-turn session | 1,015 | 30 | ~1.2k tok | $0.00 |
+
+Population size does not change context size. One God call can render several
+People. Context does not grow with conversation length.
+
+See [`handoff/god-v2/`](handoff/god-v2/) for the production God package.
+
 ## Tests
 
 Run with `pnpm test` (vitest) and `pnpm typecheck` (tsc `--noEmit`).
 
-**Result: 42/42 pass across 8 files. Typecheck clean.**
+**Result: 98/98 pass across 11 files. Typecheck clean.**
 
 ### The 14 Required Proofs
 
@@ -297,7 +346,7 @@ Run with `pnpm test` (vitest) and `pnpm typecheck` (tsc `--noEmit`).
 - Sessions (rolling-window context)
 - CostSimulator + CircuitBreakers + BudgetGovernor + kill switch
 - ChatGPT/SocialCore bridge contracts (disabled)
-- Operator CLI + 42 tests + typecheck clean
+- Operator CLI + 98 tests + typecheck clean
 - God/GrokBot handoff package
 
 ### 🔄 NEXT (v0.2)

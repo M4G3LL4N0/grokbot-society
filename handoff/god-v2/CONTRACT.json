@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "grokbot-society god-bridge v2",
+  "version": "2.0.0",
+  "description": "Stable contract between ONE external God GrokBot and the Society runtime. God never owns state and never constructs its own context.",
+  "identity": {
+    "agents": 1,
+    "label": "God",
+    "internalId": "SocialCore",
+    "rendersPersons": true,
+    "createsPersons": false,
+    "persistsState": false,
+    "recursion": 0
+  },
+  "eventIn": {
+    "description": "The ONLY thing God sends. Smallest useful input.",
+    "type": "object",
+    "required": ["type", "text"],
+    "additionalProperties": false,
+    "properties": {
+      "type": { "enum": ["USER_MESSAGE", "DIRECT_INTERACTION", "GROUP_INTERACTION"] },
+      "text": { "type": "string", "maxLength": 2000 },
+      "circleId": { "type": "string", "optional": true },
+      "personIds": { "type": "array", "items": { "type": "string" }, "optional": true }
+    }
+  },
+  "inputOut": {
+    "description": "What Society returns when inference is warranted.",
+    "required": ["eventId", "scene", "participants", "constraints", "outputSchema", "accounting"],
+    "fields": {
+      "eventId": "string — assigned by Society",
+      "scene": "string — short description of the moment",
+      "userMessage": "string — the original text",
+      "participants": "array — ≤ constraints.maxSpeakers; each has personId, name, roles, why, identity",
+      "relationships": "array — ≤ 4 per person, each with dimensions and why",
+      "memories": "array — ≤ 5 per person, each with content, kind, importance and why",
+      "constraints": {
+        "maxSpeakers": "number (≤3)",
+        "maxOutputTokens": "number (≤400)",
+        "recursion": "always 0",
+        "maxCallsThisEvent": "always 1"
+      },
+      "outputSchema": "string — the exact JSON shape to return",
+      "accounting": {
+        "characters": "number — exact size of this input",
+        "estimatedTokens": "number",
+        "participantCount": "number",
+        "memoryCount": "number",
+        "relationshipCount": "number",
+        "populationSize": "number — size of the society, as a count only",
+        "excludedCount": "number — how many persons were not selected",
+        "exclusionCriterion": "string",
+        "memoriesIncluded": "array of strings",
+        "participantsIncluded": "array of person ids",
+        "truncation": "array of strings — what was capped and at what limit"
+      }
+    }
+  },
+  "resultIn": {
+    "description": "What God returns. Structured deltas only.",
+    "type": "object",
+    "required": ["jobId", "eventId", "messages"],
+    "properties": {
+      "jobId": { "type": "string", "description": "godjob_<eventId>" },
+      "eventId": { "type": "string" },
+      "messages": {
+        "type": "array",
+        "maxItems": 3,
+        "items": {
+          "type": "object",
+          "required": ["personId", "text"],
+          "properties": {
+            "personId": { "type": "string", "description": "MUST be in input.participants" },
+            "text": { "type": "string", "maxLength": 200 }
+          }
+        }
+      },
+      "memoryCandidates": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["personId", "content"],
+          "properties": {
+            "personId": { "type": "string" },
+            "content": { "type": "string" },
+            "kind": { "type": "string" }
+          }
+        }
+      },
+      "relationshipCandidates": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["personId", "targetId", "dim", "delta"],
+          "properties": {
+            "personId": { "type": "string" },
+            "targetId": { "type": "string" },
+            "dim": { "enum": ["familiarity", "trust", "affection", "respect", "attraction", "comfort"] },
+            "delta": { "type": "number", "minimum": -0.1, "maximum": 0.1 }
+          }
+        }
+      },
+      "timelineCandidates": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["personId", "kind", "content"],
+          "properties": {
+            "personId": { "type": "string" },
+            "kind": { "type": "string" },
+            "content": { "type": "string" }
+          }
+        }
+      },
+      "followups": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["personId", "delayMs", "reason"],
+          "properties": {
+            "personId": { "type": "string" },
+            "delayMs": { "type": "number" },
+            "reason": { "type": "string" }
+          }
+        }
+      },
+      "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+    }
+  },
+  "limits": {
+    "maxCallsPerEvent": 1,
+    "recursionDepth": 0,
+    "backgroundModelCalls": 0,
+    "maxRetries": 0,
+    "maxActiveSpeakers": 3,
+    "maxOutputTokens": 400,
+    "maxRelationshipsPerPerson": 4,
+    "maxMemoriesPerPerson": 5,
+    "proactivePaidInference": false,
+    "serendipityPaidGeneration": false,
+    "backgroundLifeSimulation": false
+  },
+  "guarantees": [
+    "God is never sent the repository, README, database, or full conversation history.",
+    "God is never sent every Person: the population is disclosed as a count only.",
+    "Person identities are Society state; swapping the model does not change who they are.",
+    "One God call may render several Persons; several speakers is never several calls.",
+    "A message for a Person who was not selected is dropped, not honored.",
+    "A duplicate result for the same event is refused.",
+    "God failure, kill switch, pause, and budget refusal all degrade to a deterministic scene.",
+    "The society is fully functional with the bridge disabled."
+  ],
+  "costAccounting": {
+    "recordedPerCall": [
+      "eventId", "timestamp", "reasonGrokRequired", "participants", "participantNames",
+      "roles", "circleId", "inputTokens", "outputTokens", "cachedTokens",
+      "model", "provider", "estimatedCost", "reportedCost", "latencyMs",
+      "resultStatus", "stateChanges", "missAnalysis"
+    ],
+    "missAnalysis": [
+      "looksDeterministic", "nearCacheable", "speakerCount",
+      "usedRelationshipContext", "usedMemoryContext", "digest"
+    ],
+    "note": "missAnalysis is computed locally from the returned result; answering it never costs another call."
+  },
+  "commands": {
+    "health": "pnpm society god health",
+    "submit": "pnpm society god submit '<eventJson>' --bridge",
+    "context": "pnpm society god context <eventId>",
+    "result": "pnpm society god result '<resultJson>'",
+    "usage": "pnpm society god usage",
+    "benchmarks": "pnpm society god benchmarks [A-F]",
+    "compare": "pnpm society god compare <scenarioId>"
+  }
+}

@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline";
+import { readFileSync } from "node:fs";
 import { SystemClock } from "../god/clock.ts";
 import { buildKernelConfig } from "../god/config.ts";
 import { GodKernel } from "../god/GodKernel.ts";
+import { GodBridge, GOD_LIMITS, BENCHMARKS, compareRoutes } from "../godbridge/index.ts";
+import type { GodEventInput, GodResult } from "../godbridge/types.ts";
 
 // ───────────────────────────────────────────────────────────── helper out
 function pad(s: unknown, width: number): string {
@@ -175,6 +178,19 @@ function cmdLandmarks(k: GodKernel, personId: string): string {
   return k.memory.landmarksFor(personId).map((m) => `• ${m.content}`).join("\n") || "no landmarks";
 }
 
+/** Read a God payload from a file, a quoted arg, stdin, or --file. */
+function readGodArg(args: string[], inline: string | undefined): string {
+  const fileFlag = args.indexOf("--file");
+  if (fileFlag >= 0 && args[fileFlag + 1]) {
+    return readFileSync(args[fileFlag + 1]!, "utf8");
+  }
+  if (inline) return inline;
+  const positional = args.find((a) => !a.startsWith("--"));
+  if (positional) return positional;
+  if (!process.stdin.isTTY) return readFileSync(0, "utf8");
+  throw new Error("no payload: pass inline JSON, --file <path>, or pipe JSON on stdin");
+}
+
 function printUsage(): void {
   console.log(`society — local synthetic society CLI
 
@@ -199,6 +215,13 @@ usage: society <command> [args]
   debug <name-or-id>                 debug: bounded actor context for one person
   pause / resume                     pause/resume the society
   kill / unkill                      fail-closed kill switch (blocks ALL inference)
+  god health                         god-v2 bridge + cost-safety state
+  god submit <json> [--bridge]       tiny event in -> GodInput out (or deterministic answer)
+  god context <event|job>            inspect the bounded slice Society built
+  god result <json>                  structured God deltas -> persistent Society state
+  god usage                          cost-per-social-value metrics for God
+  god benchmarks [id]                run dry benchmark scenarios ($0.00)
+  god compare <id>                   route comparison for one normalized event
   close                              close the db cleanly
 
 env: SOCIETY_DB=<path> (default ./society.db), SOCIETY_USER=<name>, SOCIETY_INTENSITY=quiet|low|normal|social|very_social|do_not_disturb`);
@@ -279,6 +302,75 @@ async function main(): Promise<number> {
           console.log(await cmdInteractive(k));
         } else {
           console.log(await cmdChat(k, message, { circleId: circle }));
+        }
+        break;
+      }
+      case "god": {
+        const bridgeEnabled = hasFlag("--bridge") || process.env.SOCIETY_GOD_BRIDGE === "1";
+        const bridgeMode = hasFlag("--live") || process.env.SOCIETY_GOD_MODE === "live" ? "live" : "dry";
+        const bridge = new GodBridge(
+          k,
+          new SystemClock(),
+          flag("--model") === "chatgpt" ? "chatgpt" : "grok",
+          bridgeEnabled,
+          bridgeMode,
+        );
+        const sub = argv[1] ?? "health";
+        if (sub === "health") {
+          console.log(JSON.stringify(bridge.health(), null, 2));
+        } else if (sub === "submit") {
+          const raw = readGodArg(argv.slice(2), flag("--text"));
+          const input = JSON.parse(raw) as GodEventInput;
+          const outcome = await bridge.submit(input);
+          if (hasFlag("--json")) {
+            console.log(JSON.stringify(outcome, null, 2));
+          } else if (outcome.status === "needs_god" && outcome.job) {
+            console.log(JSON.stringify(outcome.job.input, null, 2));
+          } else {
+            console.log(`no external inference: ${outcome.reason}`);
+            if (outcome.deterministic) console.log(JSON.stringify(outcome.deterministic, null, 2));
+          }
+        } else if (sub === "context") {
+          const ref = argv[2] ?? flag("--event") ?? "";
+          if (!ref) { console.error("usage: society god context <eventId|jobId>"); return 1; }
+          console.log(JSON.stringify(bridge.context(ref), null, 2));
+        } else if (sub === "result") {
+          const raw = readGodArg(argv.slice(2), flag("--json-body"));
+          const result = JSON.parse(raw) as GodResult;
+          const applied = bridge.apply(result);
+          if (hasFlag("--json")) {
+            console.log(JSON.stringify({ status: applied.reason, usage: applied.usage }, null, 2));
+          } else {
+            console.log(`${applied.applied ? "persisted" : "rejected"}: ${applied.reason}`);
+            console.log(
+              `  $${applied.usage.estimatedCost.toFixed(8)} · ${applied.usage.inputTokens} in / ${applied.usage.outputTokens} out · ${applied.usage.resultStatus}`,
+            );
+            console.log(`  why god: ${applied.usage.reasonGrokRequired}`);
+          }
+        } else if (sub === "usage") {
+          console.log(JSON.stringify(bridge.usage(), null, 2));
+        } else if (sub === "benchmarks") {
+          const only = argv[2];
+          const rows = [];
+          for (const b of BENCHMARKS) {
+            if (only && b.id !== only) continue;
+            // dry mode only: never touches a paid route
+            const kk = new GodKernel({ config: buildKernelConfig({ dbPath }), overrides: { clock: new SystemClock() } });
+            kk.ensureSeeded();
+            b.setup(kk);
+            const bk = new GodBridge(kk, new SystemClock(), "grok", true, "dry");
+            const out = await b.run(kk, bk);
+            kk.close();
+            rows.push([b.id, b.title, out.events, out.modelCalls, out.personsStored, out.maxContextTokens, `$${out.estimatedCost.toFixed(8)}`]);
+          }
+          console.log(table(["id", "scenario", "events", "calls", "persons", "max ctx", "cost"], rows));
+          console.log(`
+limits: ${GOD_LIMITS.maxCallsPerEvent} call/event · recursion ${GOD_LIMITS.recursionDepth} · background ${GOD_LIMITS.backgroundCalls} · retries ${GOD_LIMITS.maxRetries} · maxSpeakers ${GOD_LIMITS.maxSpeakers}`);
+        } else if (sub === "compare") {
+          console.log(JSON.stringify(compareRoutes(k, new SystemClock(), argv[2] ?? "A"), null, 2));
+        } else {
+          console.error(`unknown god subcommand: ${sub}`);
+          return 1;
         }
         break;
       }
