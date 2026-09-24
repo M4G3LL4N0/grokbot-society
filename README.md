@@ -2,6 +2,8 @@
 
 > **A provider-neutral runtime for persistent synthetic people, roles, relationships, circles and social worlds—designed so population is cheap and intelligence is invoked only when interaction actually requires it.**
 
+Website: [https://grokbot-society.vercel.app](https://grokbot-society.vercel.app)
+
 ---
 
 ## What is GrokBot Society?
