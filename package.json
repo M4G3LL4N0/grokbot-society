@@ -1,0 +1,57 @@
+{
+  "name": "grokbot-society",
+  "version": "0.1.0",
+  "description": "A provider-neutral runtime for persistent synthetic people, roles, relationships, circles and social worlds—designed so population is cheap and intelligence is invoked only when interaction actually requires it.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "keywords": [
+    "synthetic-agents",
+    "social-agents",
+    "multi-agent",
+    "grokbot",
+    "ai-companion",
+    "agent-runtime",
+    "social-simulation",
+    "llm",
+    "agent-orchestration",
+    "persistent-agents"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "tsx src/god/index.ts",
+    "society": "tsx src/cli/society.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "pnpm typecheck && pnpm test"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/M4G3LL4N0/grokbot-society.git"
+  },
+  "bugs": {
+    "url": "https://github.com/M4G3LL4N0/grokbot-society/issues"
+  },
+  "homepage": "https://github.com/M4G3LL4N0/grokbot-society#readme",
+  "files": [
+    "src",
+    "tests",
+    "docs",
+    "examples",
+    "handoff",
+    "README.md",
+    "ARCHITECTURE.md",
+    "LICENSE",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "CODE_OF_CONDUCT.md"
+  ]
+}
