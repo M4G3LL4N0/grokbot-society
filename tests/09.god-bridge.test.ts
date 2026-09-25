@@ -390,7 +390,7 @@ describe("13 · telemetry records why Grok was invoked", () => {
     // provider was called and nothing was charged
     expect(metrics.god_jobs_completed).toBe(1);
     expect(metrics.grok_calls).toBe(0);
-    expect(metrics.avg_grok_input_tokens).toBeGreaterThan(0);
+    expect(metrics.avg_grok_input_tokens).toBe(0);
     expect(metrics.cost_per_grok_event).toBe(0);
   });
 });
@@ -428,7 +428,7 @@ describe("14 · kill and pause block God inference", () => {
 describe("clock isolation", () => {
   it("simulated clock drives job timestamps", async () => {
     const clock = new SimulatedClock(1_000);
-    const h = makeKernel();
+    const h = makeKernel({}, { sceneModelClass: "social.standard" });
     h.kernel.ensureSeeded();
     const bridge = new GodBridge(h.kernel, clock, "grok", true, "dry");
     const out = await bridge.submit({ type: "USER_MESSAGE", text: "tick", circleId: firstCircle(h) });

@@ -97,6 +97,14 @@ export interface GodInputAccounting {
 }
 
 /** What God returns. Structured deltas only — never an essay. */
+export interface GodReportedUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens?: number;
+  reportedCost?: number;
+  latencyMs?: number;
+}
+
 export interface GodResult {
   jobId: string;
   eventId: string;
@@ -106,6 +114,7 @@ export interface GodResult {
   timelineCandidates?: GodTimelineCandidate[];
   followups?: GodFollowup[];
   confidence?: number;
+  usage?: GodReportedUsage;
 }
 
 export interface GodMessage {
@@ -144,6 +153,8 @@ export interface GodJob {
   eventId: string;
   status: GodJobStatus;
   createdAt: number;
+  mode: "dry" | "live";
+  modelClass: "grok" | "chatgpt";
   /** participant ids Society selected — God may only speak for these */
   selectedPersonIds: string[];
   input: GodInput;
@@ -158,6 +169,7 @@ export interface GodCallUsage {
   eventId: string;
   jobId: string;
   timestamp: number;
+  mode: "dry" | "live";
   reasonGrokRequired: string;
   participants: string[];
   participantNames: string[];
@@ -166,12 +178,15 @@ export interface GodCallUsage {
   inputTokens: number;
   outputTokens: number;
   cachedTokens: number;
+  inputCharacters: number;
+  outputCharacters: number;
   model: string;
   provider: string;
   modelClass: ModelClass;
   estimatedCost: number;
   reportedCost: number | null;
   latencyMs: number;
+  cacheStatus: "hit" | "miss";
   resultStatus: "persisted" | "deterministic_fallback" | "rejected";
   /** false for dry runs: the pipeline was proven without a real provider call */
   providerCallRecorded: boolean;
@@ -231,6 +246,8 @@ export interface SocialCostMetrics {
   grok_calls: number;
   /** every completed God job, including dry runs that cost nothing */
   god_jobs_completed: number;
+  /** dry jobs prove the handoff without a provider call */
+  dry_runs: number;
   grok_escalation_rate: number;
   avg_grok_input_tokens: number;
   avg_grok_output_tokens: number;

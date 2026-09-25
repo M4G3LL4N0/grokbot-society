@@ -21,8 +21,9 @@
 
 import type { GodKernel } from "../god/GodKernel.ts";
 import type { Clock } from "../god/clock.ts";
+import { id } from "../god/id.ts";
 import { RELATIONSHIP_DIMENSIONS, type ModelClass, type SceneOutput, type SocietyEvent } from "../god/types.ts";
-import { estimateTokens } from "../telemetry/TelemetryService.ts";
+import { estimateCost, estimateTokens } from "../telemetry/TelemetryService.ts";
 import {
   GodBridgeError,
   type CostClass,
@@ -52,12 +53,22 @@ export const GOD_LIMITS = {
 
 export const GOD_OUTPUT_SCHEMA =
   '{"messages":[{"personId":"<one of selected>","text":"<=200 chars"}],' +
-  '"memoryCandidates":[],"relationshipCandidates":[],"timelineCandidates":[],"followups":[]}';
+  '"memoryCandidates":[],"relationshipCandidates":[],"timelineCandidates":[],"followups":[],' +
+  '"usage":{"inputTokens":0,"outputTokens":0}}';
 
 const MAX_MESSAGE_LENGTH = 200;
+const MAX_RESULT_ENTRIES = 32;
 
 function clamp(v: number, lo: number, hi: number): number {
   return Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : 0;
+}
+
+function validUsageNumber(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
+}
+
+function validCost(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 export interface GodSubmitOutcome {
@@ -77,6 +88,10 @@ export function godJobId(eventId: string): string {
 
 function stripJobPrefix(id: string): string {
   return id.startsWith("godjob_") ? id.slice("godjob_".length) : id;
+}
+
+function cloneJob(job: GodJob): GodJob {
+  return structuredClone(job);
 }
 
 export class GodBridge {
@@ -128,7 +143,7 @@ export class GodBridge {
 
     // The bridge is opt-in. With it off, the ordinary deterministic scene runs
     // and the society is fully functional without any God attached.
-    if (!this.enabled) {
+    if (!this.enabled || this.isZeroCostRoute()) {
       const scene = await this.kernel.events.processUserMessage(String(event.payload.message ?? ""), {
         circleId: event.circleId,
         personIds: event.personIds ?? undefined,
@@ -138,7 +153,7 @@ export class GodBridge {
         status: "no_inference",
         event: scene,
         costClass: output ? "DETERMINISTIC" : "NO_INFERENCE",
-        reason: "god bridge disabled; deterministic path only",
+        reason: this.enabled ? "zero-cost route; deterministic path only" : "god bridge disabled; deterministic path only",
         ...(output ? { deterministic: output } : {}),
       };
     }
@@ -169,17 +184,22 @@ export class GodBridge {
       };
     }
 
-    // Budget reservation happens BEFORE God is allowed to think.
-    const reserve = this.kernel.gateway.getBudget().canReserve({
-      eventId: created.id,
-      reason: `god bridge: ${godInput.scene}`,
-      reasonKind: "foreground",
-      modelClass: this.bridgeModelClass(),
-      estimatedInputTokens: godInput.accounting.estimatedTokens,
-      estimatedOutputTokens: GOD_LIMITS.maxOutputTokens,
-    });
+    // Budget preflight happens before God is allowed to think.
+    const estimatedCost = this.mode === "live"
+      ? this.estimatedCost(godInput.accounting.estimatedTokens, GOD_LIMITS.maxOutputTokens)
+      : 0;
+    const reserve = this.mode === "live"
+      ? this.kernel.gateway.getBudget().canReserve({
+        eventId: created.id,
+        reason: `god bridge: ${godInput.scene}`,
+        reasonKind: "foreground",
+        modelClass: this.bridgeModelClass(),
+        estimatedInputTokens: godInput.accounting.estimatedTokens,
+        estimatedOutputTokens: GOD_LIMITS.maxOutputTokens,
+        estimatedCost,
+      })
+      : true;
     if (!reserve) {
-      this.kernel.budget.countBlocked("GodBridge:budget");
       this.finalizeEvent(created.id, "deterministic_fallback", undefined);
       return {
         status: "no_inference",
@@ -197,6 +217,8 @@ export class GodBridge {
       eventId: created.id,
       status: "AWAITING_GOD",
       createdAt: this.clock.now(),
+      mode: this.mode,
+      modelClass: this.modelClass,
       selectedPersonIds: godInput.participants.map((p) => p.personId),
       input: godInput,
     };
@@ -205,9 +227,9 @@ export class GodBridge {
     this.persistJobSnapshot(job);
     return {
       status: "needs_god",
-      job,
+      job: cloneJob(job),
       event: created,
-      costClass: this.modelClass === "grok" ? "GROK" : "CHATGPT",
+      costClass: this.mode === "dry" ? "DETERMINISTIC" : this.modelClass === "grok" ? "GROK" : "CHATGPT",
       reason: godInput.scene,
     };
   }
@@ -227,71 +249,62 @@ export class GodBridge {
     applied: boolean;
     reason: string;
   } {
+    if (!result || typeof result !== "object" || typeof result.jobId !== "string" || typeof result.eventId !== "string") {
+      throw new GodBridgeError("BAD_RESULT", "jobId and eventId are required");
+    }
     const job = this.jobs.get(result.jobId) ?? this.rehydrate(result.eventId ?? stripJobPrefix(result.jobId));
     if (!job) {
       throw new GodBridgeError("UNKNOWN_JOB", `unknown God job ${result.jobId}`);
     }
+    if (job.id !== result.jobId) {
+      throw new GodBridgeError("JOB_MISMATCH", `result jobId ${result.jobId} != ${job.id}`);
+    }
     if (job.status !== "AWAITING_GOD") {
       throw new GodBridgeError("JOB_CLOSED", `job ${job.id} is already ${job.status}`);
     }
-    if (result.eventId && result.eventId !== job.eventId) {
+    if (this.kernel.isPaused()) {
+      throw new GodBridgeError("PAUSED", "society is paused — resume before applying a result");
+    }
+    if (this.kernel.config.intelligence.killSwitch) {
+      throw new GodBridgeError("KILL_SWITCH", "KillSwitch: inference blocked; result was not applied");
+    }
+    if (result.eventId !== job.eventId) {
       throw new GodBridgeError("EVENT_MISMATCH", `result eventId ${result.eventId} != job eventId ${job.eventId}`);
     }
+    if (result.confidence !== undefined && (!Number.isFinite(result.confidence) || result.confidence < 0 || result.confidence > 1)) {
+      throw new GodBridgeError("BAD_RESULT", "confidence must be between 0 and 1");
+    }
 
-    const allowed = new Set(job.selectedPersonIds);
-    const messages = (result.messages ?? []).filter((m) => allowed.has(m.personId));
-    const dropped = (result.messages ?? []).length - messages.length;
-
-    const output: SceneOutput = {
-      messages: messages.map((m) => ({ personId: m.personId, text: String(m.text).slice(0, MAX_MESSAGE_LENGTH) })),
-      memoryCandidates: (result.memoryCandidates ?? [])
-        .filter((m) => allowed.has(m.personId))
-        .map((m) => ({
-          personId: m.personId,
-          scope: "private" as const,
-          type: m.kind ?? "shared_history",
-          content: m.content,
-        })),
-      relationshipCandidates: (result.relationshipCandidates ?? [])
-        // an invented dimension is dropped, not invented into the graph
-        .filter((r) => allowed.has(r.personId) && allowed.has(r.targetId) && r.personId !== r.targetId)
-        .filter((r) => (RELATIONSHIP_DIMENSIONS as readonly string[]).includes(r.dim))
-        .map((r) => ({
-          personA: r.personId,
-          personB: r.targetId,
-          dimsDelta: { [r.dim]: clamp(r.delta, -0.1, 0.1) } as never,
-        })),
-      timelineCandidates: (result.timelineCandidates ?? [])
-        .filter((t) => allowed.has(t.personId))
-        .map((t) => ({ personId: t.personId, kind: t.kind as never, content: t.content })),
-      followups: (result.followups ?? []).filter((f) => allowed.has(f.personId)),
-    };
-
-    // persist through the same candidate path the director uses — no bypass
-    this.persistCandidates(job.eventId, output);
-    const usage = this.recordUsage(job, result, output, dropped);
-    this.finalizeEvent(job.eventId, "persisted", {
-      output,
-      selected: job.selectedPersonIds,
-      fallbackUsed: false,
-      blockedReason: null,
-      skipped: false,
-      viaGodBridge: true,
+    const { output, dropped } = this.validateResult(job.selectedPersonIds, result);
+    const usage = this.kernel.db.transaction(() => {
+      this.persistCandidates(job.eventId, output);
+      const recorded = this.recordUsage(job, result, output, dropped);
+      this.finalizeEvent(job.eventId, "persisted", {
+        output,
+        selected: job.selectedPersonIds,
+        fallbackUsed: false,
+        blockedReason: null,
+        skipped: false,
+        viaGodBridge: true,
+      });
+      this.attachUsage(job.eventId, recorded);
+      job.status = "COMPLETED";
+      job.result = result;
+      job.usage = recorded;
+      this.persistJobSnapshot(job);
+      return recorded;
     });
-    this.attachUsage(job.eventId, usage);
-
-    job.status = "COMPLETED";
-    job.result = result;
-    job.usage = usage;
 
     const event = this.eventOf(job.eventId);
     return {
-      job,
+      job: cloneJob(job),
       event,
-      costClass: this.modelClass === "grok" ? "GROK" : "CHATGPT",
+      costClass: job.mode === "dry" ? "DETERMINISTIC" : job.modelClass === "grok" ? "GROK" : "CHATGPT",
       usage,
       applied: true,
-      reason: dropped > 0 ? `${messages.length} messages applied, ${dropped} dropped (person not selected)` : `${messages.length} messages applied`,
+      reason: dropped > 0
+        ? `${output.messages.length} messages applied, ${dropped} invalid or unselected entries dropped`
+        : `${output.messages.length} messages applied`,
     };
   }
 
@@ -305,27 +318,25 @@ export class GodBridge {
     if (cached) return cached;
     const event = this.eventOf(eventId);
     if (!event) return undefined;
-    const snapshot = (event.payload?.godJob ?? undefined) as GodJob | undefined;
-    if (snapshot && snapshot.input) {
-      // the exact package God was shown, not a recomputation
-      this.jobs.set(snapshot.id, snapshot);
-      this.jobsByEvent.set(eventId, snapshot.id);
-      return snapshot;
+    const snapshot = (event.payload?.godJob ?? undefined) as Partial<GodJob> | undefined;
+    if (snapshot?.input && snapshot.id && snapshot.eventId) {
+      const normalized: GodJob = {
+        ...snapshot,
+        id: snapshot.id,
+        eventId: snapshot.eventId,
+        status: event.status === "persisted" || event.status === "deterministic_fallback"
+          ? "COMPLETED"
+          : snapshot.status ?? "AWAITING_GOD",
+        createdAt: snapshot.createdAt ?? event.createdAt,
+        mode: snapshot.mode ?? this.mode,
+        modelClass: snapshot.modelClass ?? this.modelClass,
+        selectedPersonIds: snapshot.selectedPersonIds ?? [],
+      } as GodJob;
+      this.jobs.set(normalized.id, normalized);
+      this.jobsByEvent.set(eventId, normalized.id);
+      return normalized;
     }
-    const closed = event.status === "persisted" || event.status === "deterministic_fallback";
-    const selected = this.selectedFor(event);
-    if (selected.length === 0 && !closed) return undefined;
-    const job: GodJob = {
-      id: godJobId(eventId),
-      eventId,
-      status: closed ? "COMPLETED" : "AWAITING_GOD",
-      createdAt: event.createdAt,
-      selectedPersonIds: selected.slice(0, GOD_LIMITS.maxSpeakers).map((s) => s.personId).filter(Boolean),
-      input: this.buildInput(event),
-    };
-    this.jobs.set(job.id, job);
-    this.jobsByEvent.set(eventId, job.id);
-    return job;
+    return undefined;
   }
 
   /** Inspect what Society decided for an event — the audit view for God. */
@@ -338,15 +349,20 @@ export class GodBridge {
     if (!job) {
       throw new GodBridgeError("UNKNOWN_JOB", `no God job for ${jobIdOrEventId}`);
     }
-    return job.input;
+    return structuredClone(job.input);
   }
 
   job(id: string): GodJob | undefined {
-    return this.jobs.get(id);
+    const cached = this.jobs.get(id);
+    if (cached) return cloneJob(cached);
+    const rehydrated = this.rehydrate(stripJobPrefix(id));
+    return rehydrated ? cloneJob(rehydrated) : undefined;
   }
 
   jobsList(): GodJob[] {
-    return [...this.jobs.values()].sort((a, b) => b.createdAt - a.createdAt);
+    const rows = this.kernel.db.prepare("SELECT id, payload_json FROM events WHERE payload_json LIKE '%\"godJob\"%'").all() as Array<{ id: string; payload_json: string }>;
+    for (const row of rows) this.rehydrate(row.id);
+    return [...this.jobs.values()].sort((a, b) => b.createdAt - a.createdAt).map(cloneJob);
   }
 
   health(): Record<string, unknown> {
@@ -372,7 +388,7 @@ export class GodBridge {
         zeroCostRoute: this.isZeroCostRoute(),
         sceneModelClass: k.config.intelligence.sceneModelClass,
       },
-      pendingJobs: [...this.jobs.values()].filter((j) => j.status === "AWAITING_GOD").length,
+      pendingJobs: this.jobsList().filter((j) => j.status === "AWAITING_GOD").length,
       state: k.stats(),
     };
   }
@@ -390,10 +406,10 @@ export class GodBridge {
    * the row, the schema and the audit trail are exactly the same.
    */
   private insertPendingEvent(event: SocietyEvent): SocietyEvent {
-    const id = `ev_god_${this.clock.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const eventId = id("ev_god");
     const row: SocietyEvent = {
       ...event,
-      id,
+      id: eventId,
       status: "created",
       source: "god-bridge",
       stages: ["created"],
@@ -427,13 +443,23 @@ export class GodBridge {
    * was given, even if Society state changes afterwards.
    */
   private persistJobSnapshot(job: GodJob): void {
-    const row = this.kernel.db.prepare("SELECT payload_json FROM events WHERE id = ?").get(job.eventId) as
-      | { payload_json: string }
+    const row = this.kernel.db.prepare("SELECT payload_json, stages_json FROM events WHERE id = ?").get(job.eventId) as
+      | { payload_json: string; stages_json: string }
       | undefined;
     if (!row) return;
     const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
-    payload.godJob = { ...job, status: "AWAITING_GOD" };
-    this.kernel.db.prepare("UPDATE events SET payload_json = ? WHERE id = ?").run(JSON.stringify(payload), job.eventId);
+    payload.godJob = { ...job };
+    const stages = job.status === "COMPLETED"
+      ? ["created", "validated", "selected", "context_compiled", "inference_attempted", "output_validated", "persisted"]
+      : JSON.parse(row.stages_json ?? "[]") as string[];
+    this.kernel.db
+      .prepare("UPDATE events SET person_ids_json = ?, payload_json = ?, stages_json = ? WHERE id = ?")
+      .run(
+        JSON.stringify(job.selectedPersonIds),
+        JSON.stringify(payload),
+        JSON.stringify(stages),
+        job.eventId,
+      );
   }
 
   /**
@@ -459,8 +485,14 @@ export class GodBridge {
     if (sceneResult) payload.sceneResult = sceneResult;
     delete payload.awaitingGod;
     this.kernel.db
-      .prepare("UPDATE events SET status = ?, payload_json = ?, processed_at = ? WHERE id = ?")
-      .run(status, JSON.stringify(payload), this.clock.now(), id);
+      .prepare("UPDATE events SET status = ?, payload_json = ?, stages_json = ?, processed_at = ? WHERE id = ?")
+      .run(
+        status,
+        JSON.stringify(payload),
+        JSON.stringify(["created", "validated", "selected", "context_compiled", "inference_attempted", "output_validated", status]),
+        this.clock.now(),
+        id,
+      );
   }
 
   private parseEvent(input: GodEventInput): SocietyEvent {
@@ -471,11 +503,20 @@ export class GodBridge {
     const text = typeof input.text === "string" ? input.text.trim() : "";
     if (!text) throw new GodBridgeError("BAD_EVENT", "text is required");
     if (text.length > 2_000) throw new GodBridgeError("BAD_EVENT", "text exceeds 2000 characters");
+    if (input.circleId !== undefined && (typeof input.circleId !== "string" || input.circleId.length > 256)) {
+      throw new GodBridgeError("BAD_EVENT", "circleId must be a bounded string");
+    }
+    if (input.personIds !== undefined && (!Array.isArray(input.personIds) || input.personIds.length > 1_000)) {
+      throw new GodBridgeError("BAD_EVENT", "personIds must be a bounded array");
+    }
+    const personIds = Array.isArray(input.personIds)
+      ? [...new Set(input.personIds.filter((personId): personId is string => typeof personId === "string" && personId.length <= 128))]
+      : [];
     return {
       id: "",
       eventType: input.type,
       actorId: this.kernel.getUserInfo().userId,
-      personIds: input.personIds ?? [],
+      personIds,
       circleId: input.circleId ?? null,
       payload: { message: text, via: "god-bridge" },
       status: "created",
@@ -485,8 +526,21 @@ export class GodBridge {
     } as unknown as SocietyEvent;
   }
 
-  private bridgeModelClass(): ModelClass {
-    return this.modelClass === "grok" ? "social.deep" : "social.standard";
+  private bridgeModelClass(modelClass: "grok" | "chatgpt" = this.modelClass): ModelClass {
+    return modelClass === "grok" ? "social.deep" : "social.standard";
+  }
+
+  private estimatedCost(
+    inputTokens: number,
+    outputTokens: number,
+    modelClass: "grok" | "chatgpt" = this.modelClass,
+  ): number {
+    return estimateCost(
+      this.bridgeModelClass(modelClass),
+      inputTokens,
+      outputTokens,
+      this.kernel.config.intelligence.costPer1kOutputTokens,
+    );
   }
 
   private isZeroCostRoute(): boolean {
@@ -512,13 +566,13 @@ export class GodBridge {
       const why = sel.reasons?.length ? sel.reasons.join("; ") : "selected by deterministic participant selector";
       participants.push({
         personId: sel.personId,
-        name: person.name,
-        roles: roles.map((r) => r.name),
-        why,
+        name: person.name.slice(0, 80),
+        roles: roles.slice(0, 8).map((r) => r.name.slice(0, 80)),
+        why: why.slice(0, 240),
         identity: {
           socialIntensity: person.socialIntensity,
-          traits: Object.keys(person.personality ?? {}),
-          interests: [...person.interests],
+          traits: Object.keys(person.personality ?? {}).slice(0, 12).map((trait) => trait.slice(0, 80)),
+          interests: person.interests.slice(0, 12).map((interest) => interest.slice(0, 80)),
         },
       });
 
@@ -534,10 +588,10 @@ export class GodBridge {
       for (const mem of ctx.memories.slice(0, GOD_LIMITS.maxMemoriesPerPerson)) {
         memories.push({
           personId: sel.personId,
-          content: mem.content,
-          kind: mem.type,
-          importance: mem.importance,
-          why: `retrieved memory for ${sel.personId} (limit ${GOD_LIMITS.maxMemoriesPerPerson})`,
+          content: mem.content.slice(0, 500),
+          kind: mem.type.slice(0, 40),
+          importance: clamp(mem.importance, 0, 1),
+          why: `retrieved memory for ${sel.personId} (limit ${GOD_LIMITS.maxMemoriesPerPerson})`.slice(0, 240),
         });
       }
     }
@@ -545,7 +599,7 @@ export class GodBridge {
     const selectedIds = new Set(participants.map((p) => p.personId));
     const populationSize = k.persons.count();
 
-    const scene = `${event.eventType} in ${event.circleId ?? "no circle"} · ${participants.length} speaker(s)`;
+    const scene = `${event.eventType} in ${event.circleId ?? "no circle"} · ${participants.length} speaker(s)`.slice(0, 240);
     const constraints: GodInput["constraints"] = {
       maxSpeakers: GOD_LIMITS.maxSpeakers,
       maxOutputTokens: GOD_LIMITS.maxOutputTokens,
@@ -589,6 +643,13 @@ export class GodBridge {
    * bridge inherits every existing rule: do-not-disturb, busy, relevance
    * scoring and speaker caps. The bridge never invents its own selection.
    */
+  private mostRecentPersonId(): string[] {
+    const person = this.kernel.persons
+      .list(1_000)
+      .sort((a, b) => (b.lastActiveAt ?? b.createdAt) - (a.lastActiveAt ?? a.createdAt))[0];
+    return person ? [person.id] : [];
+  }
+
   private selectedFor(event: SocietyEvent): { personId: string; reasons?: string[] }[] {
     const persisted = this.persistedSelection(event.id);
     if (persisted.length > 0) return persisted;
@@ -598,7 +659,7 @@ export class GodBridge {
         ? event.personIds
         : circleId
           ? this.kernel.circles.memberPersonIds(circleId)
-          : [];
+          : this.mostRecentPersonId();
     if (candidatePersonIds.length === 0) return [];
     return this.kernel.selector.select({
       eventId: event.id,
@@ -620,79 +681,245 @@ export class GodBridge {
     );
   }
 
+  private validateResult(selectedIds: string[], result: GodResult): { output: SceneOutput; dropped: number } {
+    const allowed = new Set(selectedIds);
+    const messages: SceneOutput["messages"] = [];
+    const memoryCandidates: SceneOutput["memoryCandidates"] = [];
+    const relationshipCandidates: SceneOutput["relationshipCandidates"] = [];
+    const timelineCandidates: SceneOutput["timelineCandidates"] = [];
+    const followups: SceneOutput["followups"] = [];
+    const rawMessages = Array.isArray(result.messages) ? result.messages : [];
+    const rawMemories = Array.isArray(result.memoryCandidates) ? result.memoryCandidates : [];
+    const rawRelationships = Array.isArray(result.relationshipCandidates) ? result.relationshipCandidates : [];
+    const rawTimeline = Array.isArray(result.timelineCandidates) ? result.timelineCandidates : [];
+    const rawFollowups = Array.isArray(result.followups) ? result.followups : [];
+    let dropped = Math.max(0, rawMessages.length - MAX_RESULT_ENTRIES)
+      + Math.max(0, rawMemories.length - MAX_RESULT_ENTRIES)
+      + Math.max(0, rawRelationships.length - MAX_RESULT_ENTRIES)
+      + Math.max(0, rawTimeline.length - MAX_RESULT_ENTRIES)
+      + Math.max(0, rawFollowups.length - MAX_RESULT_ENTRIES);
+    const seenSpeakers = new Set<string>();
+    const memoryCounts = new Map<string, number>();
+
+    for (const message of rawMessages.slice(0, MAX_RESULT_ENTRIES)) {
+      if (
+        !message ||
+        typeof message.personId !== "string" ||
+        !allowed.has(message.personId) ||
+        seenSpeakers.has(message.personId) ||
+        typeof message.text !== "string"
+      ) {
+        dropped += 1;
+        continue;
+      }
+      const text = message.text.trim().slice(0, MAX_MESSAGE_LENGTH);
+      if (!text || estimateTokens(JSON.stringify([...messages, { personId: message.personId, text }])) > GOD_LIMITS.maxOutputTokens) {
+        dropped += 1;
+        continue;
+      }
+      seenSpeakers.add(message.personId);
+      messages.push({ personId: message.personId, text });
+      if (messages.length >= GOD_LIMITS.maxSpeakers) break;
+    }
+
+    for (const candidate of rawMemories.slice(0, MAX_RESULT_ENTRIES)) {
+      if (!candidate) {
+        dropped += 1;
+        continue;
+      }
+      const count = memoryCounts.get(candidate.personId) ?? 0;
+      if (
+        !allowed.has(candidate.personId) ||
+        typeof candidate.content !== "string" ||
+        !candidate.content.trim() ||
+        count >= GOD_LIMITS.maxMemoriesPerPerson
+      ) {
+        dropped += 1;
+        continue;
+      }
+      memoryCounts.set(candidate.personId, count + 1);
+      memoryCandidates.push({
+        personId: candidate.personId,
+        scope: "private",
+        type: String(candidate.kind ?? "shared_history").slice(0, 40),
+        content: candidate.content.trim().slice(0, 500),
+      });
+    }
+
+    for (const candidate of rawRelationships.slice(0, MAX_RESULT_ENTRIES)) {
+      if (
+        !candidate ||
+        !allowed.has(candidate.personId) ||
+        !allowed.has(candidate.targetId) ||
+        candidate.personId === candidate.targetId ||
+        !(RELATIONSHIP_DIMENSIONS as readonly string[]).includes(candidate.dim) ||
+        !Number.isFinite(candidate.delta)
+      ) {
+        dropped += 1;
+        continue;
+      }
+      relationshipCandidates.push({
+        personA: candidate.personId,
+        personB: candidate.targetId,
+        dimsDelta: { [candidate.dim]: clamp(candidate.delta, -0.1, 0.1) } as never,
+      });
+      if (relationshipCandidates.length >= this.kernel.config.society.relationship.maxInteractionsPerScene) break;
+    }
+
+    for (const candidate of rawTimeline.slice(0, MAX_RESULT_ENTRIES)) {
+      if (
+        !candidate ||
+        !allowed.has(candidate.personId) ||
+        typeof candidate.kind !== "string" ||
+        typeof candidate.content !== "string" ||
+        !candidate.content.trim()
+      ) {
+        dropped += 1;
+        continue;
+      }
+      timelineCandidates.push({
+        personId: candidate.personId,
+        kind: candidate.kind.slice(0, 40),
+        content: candidate.content.trim().slice(0, 300),
+      });
+      if (timelineCandidates.length >= GOD_LIMITS.maxSpeakers * 2) break;
+    }
+
+    for (const followup of rawFollowups.slice(0, MAX_RESULT_ENTRIES)) {
+      if (
+        !followup ||
+        !allowed.has(followup.personId) ||
+        !Number.isFinite(followup.delayMs) ||
+        followup.delayMs < 60_000 ||
+        followup.delayMs > 90 * 86_400_000 ||
+        typeof followup.reason !== "string" ||
+        !followup.reason.trim()
+      ) {
+        dropped += 1;
+        continue;
+      }
+      followups.push({
+        personId: followup.personId,
+        delayMs: followup.delayMs,
+        reason: followup.reason.trim().slice(0, 200),
+      });
+      if (followups.length >= GOD_LIMITS.maxSpeakers) break;
+    }
+
+    const output: SceneOutput = {
+      messages,
+      memoryCandidates,
+      relationshipCandidates,
+      timelineCandidates,
+      followups,
+    };
+    const auxiliary = [memoryCandidates, relationshipCandidates, timelineCandidates, followups];
+    while (estimateTokens(JSON.stringify(output)) > GOD_LIMITS.maxOutputTokens) {
+      const array = [...auxiliary].reverse().find((items) => items.length > 0);
+      if (!array) break;
+      array.pop();
+      dropped += 1;
+    }
+    return { output, dropped };
+  }
+
   private persistCandidates(eventId: string, output: SceneOutput): void {
     const k = this.kernel;
+    const event = this.eventOf(eventId);
     if (output.memoryCandidates.length > 0) {
-      k.memory.applyCandidates(output.memoryCandidates);
+      k.memory.applyCandidates(
+        output.memoryCandidates.map((candidate) => ({ ...candidate, source: `event:${eventId}` })),
+      );
     }
     if (output.relationshipCandidates.length > 0) {
-      k.relationship.applyCandidates(output.relationshipCandidates);
+      k.relationship.applyCandidates(
+        output.relationshipCandidates,
+        k.config.society.relationship.maxDeltaPerScene,
+      );
     }
-    for (const t of output.timelineCandidates) {
-      k.timeline.append({ personId: t.personId, kind: t.kind, content: t.content, at: this.clock.now() });
-    }
-    // A followup is SCHEDULED, never fired now: it must not become an event in
-    // this scene, and it must not cost anything until it is actually due.
-    for (const f of output.followups) {
-      const fireAt = this.clock.now() + Math.max(0, f.delayMs);
-      k.db
-        .prepare(
-          `INSERT INTO followups (id, person_id, reason, fire_at, status, created_at)
-           VALUES (?,?,?,?,?,?)`,
-        )
-        .run(`fu_${this.clock.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`, f.personId, f.reason, fireAt, "pending", this.clock.now());
-    }
-    for (const m of output.messages) {
+    for (const timeline of output.timelineCandidates) {
       k.timeline.append({
-        personId: m.personId,
+        personId: timeline.personId,
+        circleId: event?.circleId ?? null,
         eventId,
-        kind: "message",
-        content: m.text,
+        kind: timeline.kind,
+        content: timeline.content,
         at: this.clock.now(),
       });
     }
-    void eventId;
+    for (const followup of output.followups) {
+      k.db
+        .prepare(
+          `INSERT INTO followups (id, person_id, event_id, reason, fire_at, status, created_at)
+           VALUES (?,?,?,?,?,?,?)`,
+        )
+        .run(
+          id("fu"),
+          followup.personId,
+          eventId,
+          followup.reason,
+          this.clock.now() + followup.delayMs,
+          "pending",
+          this.clock.now(),
+        );
+    }
+    for (const message of output.messages) {
+      k.timeline.append({
+        personId: message.personId,
+        circleId: event?.circleId ?? null,
+        eventId,
+        kind: "message",
+        content: message.text,
+        at: this.clock.now(),
+      });
+      k.persons.touch(message.personId);
+    }
   }
 
   private recordUsage(
     job: GodJob,
     result: GodResult,
     output: SceneOutput,
-    dropped: number,
+    _dropped: number,
   ): GodCallUsage {
     const k = this.kernel;
     const participants = job.selectedPersonIds;
     const roles = participants.flatMap((pid) => k.roles.assignments(pid).map((r) => r.name));
-    const inputChars = job.input.accounting.characters;
-    const outputChars = output.messages.reduce((n, m) => n + m.text.length, 0);
-    const inputTokens = job.input.accounting.estimatedTokens;
-    const outputTokens = estimateTokens(outputChars ? JSON.stringify(output.messages) : "[]");
-    const priceIn = 0.000_005 * inputTokens;
-    const priceOut = 0.000_02 * outputTokens;
-    const rawCost = Number((priceIn + priceOut).toFixed(8));
-    // dry mode proves the pipeline without spending anything
-    const estimatedCost = this.mode === "dry" ? 0 : rawCost;
-
-    // ONE accounting boundary, owned by the gateway. A dry run proves the
-    // pipeline without inventing a provider call that never happened.
+    const inputCharacters = job.input.accounting.characters;
+    const serializedOutput = JSON.stringify(output);
+    const outputCharacters = serializedOutput.length;
+    const reported = result.usage;
+    const inputTokens = validUsageNumber(reported?.inputTokens, job.input.accounting.estimatedTokens);
+    const outputTokens = validUsageNumber(reported?.outputTokens, estimateTokens(serializedOutput));
+    const cachedTokens = validUsageNumber(reported?.cachedTokens, 0);
+    const reportedCost = validCost(reported?.reportedCost);
+    const modeledCost = this.estimatedCost(inputTokens, outputTokens, job.modelClass);
+    const estimatedCost = job.mode === "dry"
+      ? 0
+      : Math.max(modeledCost, reportedCost ?? 0);
+    const latencyMs = validUsageNumber(reported?.latencyMs, Math.max(0, this.clock.now() - job.createdAt));
+    const model = job.modelClass === "grok" ? "grok-external" : "chatgpt-external";
+    const providerCallRecorded = job.mode === "live";
     k.gateway.acceptExternalResult({
       eventId: job.eventId,
-      reason: `god bridge external inference (${this.modelClass})`,
+      reason: `god bridge external inference (${job.modelClass})`,
       caller: "GodBridge",
-      provider: this.modelClass,
-      model: this.modelClass === "grok" ? "grok-external" : "chatgpt-external",
-      modelClass: this.bridgeModelClass(),
+      provider: job.modelClass,
+      model,
+      modelClass: this.bridgeModelClass(job.modelClass),
       inputTokens,
       outputTokens,
       estimatedCost,
-      providerCallRecorded: this.mode === "live",
+      durationMs: latencyMs,
+      providerCallRecorded,
     });
 
     const speakerCount = output.messages.length;
-    const usage: GodCallUsage = {
+    return {
       eventId: job.eventId,
       jobId: job.id,
       timestamp: this.clock.now(),
+      mode: job.mode,
       reasonGrokRequired: job.input.scene,
       participants,
       participantNames: participants.map((pid) => k.persons.get(pid)?.name ?? pid),
@@ -700,22 +927,27 @@ export class GodBridge {
       circleId: this.eventOf(job.eventId)?.circleId ?? null,
       inputTokens,
       outputTokens,
-      cachedTokens: 0,
-      model: this.modelClass === "grok" ? "grok-external" : "chatgpt-external",
-      provider: this.modelClass,
-      modelClass: this.bridgeModelClass(),
-      estimatedCost,
-      reportedCost: null,
-      latencyMs: this.clock.now() - job.createdAt,
+      cachedTokens,
+      inputCharacters,
+      outputCharacters,
+      model,
+      provider: job.modelClass,
+      modelClass: this.bridgeModelClass(job.modelClass),
+      estimatedCost: Number(estimatedCost.toFixed(8)),
+      reportedCost,
+      latencyMs,
+      cacheStatus: "miss",
       resultStatus: "persisted",
-      providerCallRecorded: this.mode === "live",
+      providerCallRecorded,
       stateChanges: {
         messagesApplied: output.messages.length,
         memoryCandidates: output.memoryCandidates.length,
         relationshipCandidates: output.relationshipCandidates.length,
         timelineCandidates: output.timelineCandidates.length,
         followups: output.followups.length,
-        relationshipsUpdated: output.relationshipCandidates.map((r) => `${r.personA}->${r.personB}:${Object.keys(r.dimsDelta).join(",")}`),
+        relationshipsUpdated: output.relationshipCandidates.map(
+          (candidate) => `${candidate.personA}->${candidate.personB}:${Object.keys(candidate.dimsDelta).join(",")}`,
+        ),
       },
       missAnalysis: {
         looksDeterministic: speakerCount === 0 || (speakerCount === 1 && output.messages[0]!.text.length < 40),
@@ -723,14 +955,9 @@ export class GodBridge {
         speakerCount,
         usedRelationshipContext: output.relationshipCandidates.length > 0,
         usedMemoryContext: output.memoryCandidates.length > 0,
-        digest: output.messages.map((m) => `${m.personId}: ${m.text.slice(0, 60)}`).join(" | ").slice(0, 300),
+        digest: output.messages.map((message) => `${message.personId}: ${message.text.slice(0, 60)}`).join(" | ").slice(0, 300),
       },
     };
-    void result;
-    void dropped;
-    void inputChars;
-    void outputChars;
-    return usage;
   }
 
   private fallbackFor(personIds: string[]): SceneOutput {
@@ -787,13 +1014,12 @@ export class GodBridge {
 /** Aggregate cost-per-social-value metrics from events + God jobs. */
 export function collectSocialCostMetrics(
   kernel: GodKernel,
-  jobs: GodJob[],
+  _jobs: GodJob[],
   _now: number,
 ): SocialCostMetrics {
   const rows = kernel.db
-    .prepare("SELECT id, event_type, status, circle_id, payload_json, created_at FROM events")
+    .prepare("SELECT id, event_type, status, source, payload_json, created_at FROM events")
     .all() as Record<string, unknown>[];
-
   const byClass: Record<CostClass, number> = {
     NO_INFERENCE: 0,
     CACHE: 0,
@@ -803,35 +1029,46 @@ export function collectSocialCostMetrics(
     GROK: 0,
   };
   let zeroInference = 0;
-  // call accounting is read from PERSISTED events so metrics survive restarts
-  const godCalls = (kernel.db
-    .prepare("SELECT payload_json FROM events WHERE payload_json LIKE '%\"godCall\"%'")
-    .all() as { payload_json: string }[])
-    .map((r) => (JSON.parse(r.payload_json) as { godCall: GodCallUsage }).godCall)
-    .filter(Boolean);
+  const godCalls = rows
+    .map((row) => {
+      const payload = JSON.parse((row.payload_json as string) ?? "{}") as Record<string, unknown>;
+      return payload.godCall as GodCallUsage | undefined;
+    })
+    .filter((call): call is GodCallUsage => Boolean(call));
+  const liveCalls = godCalls.filter((call) => call.providerCallRecorded);
+  const dryRuns = godCalls.length - liveCalls.length;
 
   for (const row of rows) {
     const payload = JSON.parse((row.payload_json as string) ?? "{}") as Record<string, unknown>;
-    const result = payload.sceneResult as { blockedReason?: string | null; fallbackUsed?: boolean } | undefined;
+    const call = payload.godCall as GodCallUsage | undefined;
+    const result = payload.sceneResult as { blockedReason?: string | null } | undefined;
     let cls: CostClass;
-    if (payload.godCall) cls = "GROK";
-    else if (result?.blockedReason === "NO_ACTION:pacing") cls = "NO_INFERENCE";
-    else cls = "DETERMINISTIC";
+    if (call?.cacheStatus === "hit") {
+      cls = "CACHE";
+    } else if (call?.providerCallRecorded && call.provider === "chatgpt") {
+      cls = "CHATGPT";
+    } else if (call?.providerCallRecorded && call.modelClass === "social.deep") {
+      cls = "GROK";
+    } else if (call?.providerCallRecorded) {
+      cls = "CHEAP";
+    } else if (result?.blockedReason === "NO_ACTION:pacing" || row.status === "silent" || row.status === "no_action") {
+      cls = "NO_INFERENCE";
+    } else {
+      cls = "DETERMINISTIC";
+    }
     byClass[cls] += 1;
-    if (cls === "NO_INFERENCE" || cls === "DETERMINISTIC") zeroInference += 1;
+    if (cls === "NO_INFERENCE" || cls === "DETERMINISTIC" || cls === "CACHE") zeroInference += 1;
   }
 
-  // a dry run is a completed job but NOT a provider call
-  const realCalls = godCalls.filter((c) => c.providerCallRecorded);
-  const grokCalls = realCalls.length;
-  const measured = godCalls.length > 0 ? godCalls : realCalls;
-  const avgIn = measured.length ? Math.round(measured.reduce((n, j) => n + j.inputTokens, 0) / measured.length) : 0;
-  const avgOut = measured.length ? Math.round(measured.reduce((n, j) => n + j.outputTokens, 0) / measured.length) : 0;
-  const totalCost = godCalls.reduce((n, j) => n + j.estimatedCost, 0);
-  void jobs;
-  const sessions = (
-    kernel.db.prepare("SELECT COUNT(*) AS n FROM sessions").get() as { n: number }
-  ).n;
+  const grokCalls = liveCalls.filter((call) => call.modelClass === "social.deep").length;
+  const avgIn = grokCalls
+    ? Math.round(liveCalls.filter((call) => call.modelClass === "social.deep").reduce((n, call) => n + call.inputTokens, 0) / grokCalls)
+    : 0;
+  const avgOut = grokCalls
+    ? Math.round(liveCalls.filter((call) => call.modelClass === "social.deep").reduce((n, call) => n + call.outputTokens, 0) / grokCalls)
+    : 0;
+  const totalCost = liveCalls.reduce((n, call) => n + call.estimatedCost, 0);
+  const sessions = (kernel.db.prepare("SELECT COUNT(*) AS n FROM sessions").get() as { n: number }).n;
 
   return {
     events_total: rows.length,
@@ -842,6 +1079,7 @@ export function collectSocialCostMetrics(
     chatgpt_calls: byClass.CHATGPT,
     grok_calls: grokCalls,
     god_jobs_completed: godCalls.length,
+    dry_runs: dryRuns,
     grok_escalation_rate: rows.length ? Number((grokCalls / rows.length).toFixed(4)) : 0,
     avg_grok_input_tokens: avgIn,
     avg_grok_output_tokens: avgOut,

@@ -4,8 +4,9 @@ import { readFileSync } from "node:fs";
 import { SystemClock } from "../god/clock.ts";
 import { buildKernelConfig } from "../god/config.ts";
 import { GodKernel } from "../god/GodKernel.ts";
-import { GodBridge, GOD_LIMITS, BENCHMARKS, compareRoutes } from "../godbridge/index.ts";
-import type { GodEventInput, GodResult } from "../godbridge/types.ts";
+import { BENCHMARKS, GodBridge, GOD_LIMITS, compareRoutes, runBenchmarks } from "../godbridge/index.ts";
+import { migrateLegacyFacts } from "../godbridge/index.ts";
+import type { GodEventInput, GodResult, LegacyFacts } from "../godbridge/index.ts";
 
 // ───────────────────────────────────────────────────────────── helper out
 function pad(s: unknown, width: number): string {
@@ -222,6 +223,7 @@ usage: society <command> [args]
   god usage                          cost-per-social-value metrics for God
   god benchmarks [id]                run dry benchmark scenarios ($0.00)
   god compare <id>                   route comparison for one normalized event
+  god migrate <json>                 import allowlisted durable legacy facts
   close                              close the db cleanly
 
 env: SOCIETY_DB=<path> (default ./society.db), SOCIETY_USER=<name>, SOCIETY_INTENSITY=quiet|low|normal|social|very_social|do_not_disturb`);
@@ -237,18 +239,50 @@ async function main(): Promise<number> {
   const hasFlag = (name: string) => argv.includes(name);
 
   const dbPath = flag("--db") ?? process.env.SOCIETY_DB ?? "./society.db";
+  const bridgeRequested = hasFlag("--bridge") || process.env.SOCIETY_GOD_BRIDGE === "1" || hasFlag("--live") || process.env.SOCIETY_GOD_MODE === "live";
   const mkKernel = (): GodKernel => {
-    const config = buildKernelConfig({
-      dbPath,
-      user: {
-        socialIntensity: process.env.SOCIETY_INTENSITY ?? "normal",
+    const config = buildKernelConfig(
+      {
+        dbPath,
+        user: {
+          socialIntensity: process.env.SOCIETY_INTENSITY ?? "normal",
+        },
+      },
+      bridgeRequested ? { sceneModelClass: "social.standard" } : undefined,
+    );
+    return new GodKernel({
+      config,
+      overrides: {
+        clock: new SystemClock(),
+        ...(process.env.SOCIETY_USER ? { user: { name: process.env.SOCIETY_USER } } : {}),
       },
     });
-    return new GodKernel({ config, overrides: { clock: new SystemClock() } });
   };
 
   if (cmd === "help" || cmd === "--help" || cmd === "-h") {
     printUsage();
+    return 0;
+  }
+
+  if (cmd === "god" && argv[1] === "benchmarks") {
+    const only = argv[2]?.startsWith("--") ? undefined : argv[2];
+    const outcomes = await runBenchmarks(only);
+    if (only && outcomes.length === 0) {
+      console.error(`unknown benchmark: ${only}`);
+      return 1;
+    }
+    const rows = outcomes.map((outcome) => [
+      outcome.id,
+      BENCHMARKS.find((definition) => definition.id === outcome.id)?.title ?? outcome.id,
+      outcome.events,
+      outcome.modelCalls,
+      outcome.personsStored,
+      outcome.maxContextTokens,
+      `$${outcome.estimatedCost.toFixed(8)}`,
+    ]);
+    console.log(table(["id", "scenario", "events", "calls", "persons", "max ctx", "cost"], rows));
+    console.log(`
+limits: ${GOD_LIMITS.maxCallsPerEvent} call/event · recursion ${GOD_LIMITS.recursionDepth} · background ${GOD_LIMITS.backgroundCalls} · retries ${GOD_LIMITS.maxRetries} · maxSpeakers ${GOD_LIMITS.maxSpeakers}`);
     return 0;
   }
 
@@ -350,24 +384,30 @@ async function main(): Promise<number> {
         } else if (sub === "usage") {
           console.log(JSON.stringify(bridge.usage(), null, 2));
         } else if (sub === "benchmarks") {
-          const only = argv[2];
-          const rows = [];
-          for (const b of BENCHMARKS) {
-            if (only && b.id !== only) continue;
-            // dry mode only: never touches a paid route
-            const kk = new GodKernel({ config: buildKernelConfig({ dbPath }), overrides: { clock: new SystemClock() } });
-            kk.ensureSeeded();
-            b.setup(kk);
-            const bk = new GodBridge(kk, new SystemClock(), "grok", true, "dry");
-            const out = await b.run(kk, bk);
-            kk.close();
-            rows.push([b.id, b.title, out.events, out.modelCalls, out.personsStored, out.maxContextTokens, `$${out.estimatedCost.toFixed(8)}`]);
+          const only = argv[2]?.startsWith("--") ? undefined : argv[2];
+          const outcomes = await runBenchmarks(only);
+          if (only && outcomes.length === 0) {
+            console.error(`unknown benchmark: ${only}`);
+            return 1;
           }
+          const rows = outcomes.map((outcome) => [
+            outcome.id,
+            BENCHMARKS.find((definition) => definition.id === outcome.id)?.title ?? outcome.id,
+            outcome.events,
+            outcome.modelCalls,
+            outcome.personsStored,
+            outcome.maxContextTokens,
+            `$${outcome.estimatedCost.toFixed(8)}`,
+          ]);
           console.log(table(["id", "scenario", "events", "calls", "persons", "max ctx", "cost"], rows));
           console.log(`
 limits: ${GOD_LIMITS.maxCallsPerEvent} call/event · recursion ${GOD_LIMITS.recursionDepth} · background ${GOD_LIMITS.backgroundCalls} · retries ${GOD_LIMITS.maxRetries} · maxSpeakers ${GOD_LIMITS.maxSpeakers}`);
         } else if (sub === "compare") {
           console.log(JSON.stringify(compareRoutes(k, new SystemClock(), argv[2] ?? "A"), null, 2));
+        } else if (sub === "migrate") {
+          const raw = readGodArg(argv.slice(2), flag("--json-body"));
+          const report = migrateLegacyFacts(k, JSON.parse(raw) as LegacyFacts);
+          console.log(JSON.stringify(report, null, 2));
         } else {
           console.error(`unknown god subcommand: ${sub}`);
           return 1;
@@ -404,7 +444,7 @@ limits: ${GOD_LIMITS.maxCallsPerEvent} call/event · recursion ${GOD_LIMITS.recu
       case "resume": console.log(k.resume()); console.log(cmdStatus(k)); break;
       case "kill": console.log(k.setKillSwitch(true)); break;
       case "unkill": console.log(k.setKillSwitch(false)); break;
-      case "close": k.close(); console.log("db closed"); return 0;
+      case "close": console.log("db closed"); break;
       default:
         printUsage();
         return 1;
@@ -416,7 +456,9 @@ limits: ${GOD_LIMITS.maxCallsPerEvent} call/event · recursion ${GOD_LIMITS.recu
 }
 
 main().then(
-  () => {},
+  (code) => {
+    process.exitCode = code;
+  },
   (e: unknown) => {
     console.error(e instanceof Error ? e.message : e);
     process.exitCode = 1;

@@ -112,6 +112,10 @@ export class GodKernel {
     this.config = options.config ?? buildKernelConfig();
     this.clock = overrides.clock ?? new SystemClock();
     this.db = overrides.db ?? new SocietyDB(this.config.society.dbPath);
+    const storedKillSwitch = this.db.meta.get("society.killSwitch") as { enabled?: boolean } | undefined;
+    if (typeof storedKillSwitch?.enabled === "boolean") {
+      this.config.intelligence.killSwitch = storedKillSwitch.enabled;
+    }
     const rng = overrides.rng ?? Math.random;
     this.rng = rng;
 
@@ -550,6 +554,7 @@ export class GodKernel {
   /** Kill switch: when ON, every provider/model call fails closed (no inference). */
   setKillSwitch(on: boolean): { killSwitch: boolean } {
     this.config.intelligence.killSwitch = on;
+    this.db.meta.set("society.killSwitch", { enabled: on, at: this.clock.now() });
     return { killSwitch: this.config.intelligence.killSwitch };
   }
 

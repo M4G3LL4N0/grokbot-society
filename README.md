@@ -125,6 +125,14 @@ usage: society <command> [args]
   debug <name-or-id>                 debug: bounded actor context for one person
   pause / resume                     pause/resume the society
   kill / unkill                      fail-closed kill switch (blocks ALL inference)
+  god health                         god-v2 bridge + safety state
+  god submit <json> [--bridge]       tiny event -> bounded GodInput
+  god context <event-or-job-id>      inspect the persisted bounded slice
+  god result <json>                  structured God deltas -> persistent state
+  god usage                          cost-per-social-value metrics
+  god benchmarks [A-F]               isolated dry scenarios ($0.00)
+  god compare <A-F>                  normalized route comparison
+  god migrate <json>                 import allowlisted durable legacy facts
   close                              close the db cleanly
 ```
 
@@ -259,14 +267,17 @@ later without spending another call.
 
 **Measured (dry, `pnpm society god benchmarks`):**
 
-| scenario | persons | calls | max context | cost |
-| --- | --- | --- | --- | --- |
-| A one person | 5 | 1 | ~1.2k tok | $0.00 |
-| B three-person circle | 5 | 1 | ~1.2k tok | $0.00 |
-| C ten-person circle | 15 | 1 | ~0.2k tok | $0.00 |
-| D 1,000-person society | 1,015 | 1 | ~1.2k tok | $0.00 |
-| E 10-message conversation | 1,015 | 10 | ~1.2k tok | $0.00 |
-| F 30-turn session | 1,015 | 30 | ~1.2k tok | $0.00 |
+| scenario | persons | dry jobs | provider calls | max context | cost |
+| --- | --- | --- | --- | --- | --- |
+| A one person | 5 | 1 | 0 | ~1.2k tok | $0.00 |
+| B three-person circle | 5 | 1 | 0 | ~1.2k tok | $0.00 |
+| C ten-person circle | 15 | 1 | 0 | ~0.2k tok | $0.00 |
+| D 1,000-person society | 1,005 | 1 | 0 | ~1.2k tok | $0.00 |
+| E 10-message conversation | 5 | 10 | 0 | ~1.2k tok | $0.00 |
+| F 30-turn session | 5 | 30 | 0 | ~1.2k tok | $0.00 |
+
+Dry runs prove the handoff and persist usage without inventing a provider call.
+A live run must be explicitly enabled and is accounted through the gateway.
 
 Population size does not change context size. One God call can render several
 People. Context does not grow with conversation length.
@@ -277,7 +288,7 @@ See [`handoff/god-v2/`](handoff/god-v2/) for the production God package.
 
 Run with `pnpm test` (vitest) and `pnpm typecheck` (tsc `--noEmit`).
 
-**Result: 98/98 pass across 11 files. Typecheck clean.**
+**Result: 128/128 pass across 13 files. Typecheck clean.**
 
 ### The 14 Required Proofs
 
@@ -346,7 +357,7 @@ Run with `pnpm test` (vitest) and `pnpm typecheck` (tsc `--noEmit`).
 - Sessions (rolling-window context)
 - CostSimulator + CircuitBreakers + BudgetGovernor + kill switch
 - ChatGPT/SocialCore bridge contracts (disabled)
-- Operator CLI + 98 tests + typecheck clean
+- Operator CLI + 128 tests + typecheck clean
 - God/GrokBot handoff package
 
 ### 🔄 NEXT (v0.2)

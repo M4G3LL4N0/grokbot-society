@@ -37,6 +37,27 @@ interface CachedGeneration {
   cost: number;
 }
 
+export interface ExternalResultInput {
+  eventId: string;
+  reason: string;
+  caller: string;
+  reasonKind?: "foreground" | "background";
+  provider: string;
+  model: string;
+  modelClass: ModelClass;
+  inputTokens: number;
+  outputTokens: number;
+  estimatedCost: number;
+  durationMs?: number;
+  providerCallRecorded: boolean;
+}
+
+export interface ExternalResultReceipt {
+  booked: boolean;
+  cost: number;
+  telemetryId: number | null;
+}
+
 /**
  * IntelligenceGateway — the ONE approved path for paid/model inference.
  *
@@ -82,47 +103,44 @@ export class IntelligenceGateway {
     this.providers.set(provider.name, provider);
   }
 
-  /**
-   * The single accounting boundary for an EXTERNAL inference whose transport
-   * lives outside this process (the God GrokBot). It books the call into the
-   * same budget + telemetry ledger as every other inference, so external work
-   * can never be invisible to cost accounting.
-   *
-   * `providerCallRecorded` is false for dry runs: the pipeline is proven without
-   * inventing a provider call that never happened.
-   */
-  acceptExternalResult(input: {
-    eventId: string;
-    reason: string;
-    caller: string;
-    provider: string;
-    model: string;
-    modelClass: ModelClass;
-    inputTokens: number;
-    outputTokens: number;
-    estimatedCost: number;
-    providerCallRecorded: boolean;
-  }): { booked: boolean; cost: number } {
+  acceptExternalResult(input: ExternalResultInput): ExternalResultReceipt {
     if (!input.providerCallRecorded) {
-      return { booked: false, cost: 0 };
+      return { booked: false, cost: 0, telemetryId: null };
     }
-    this.telemetry.record(
-      {
-        eventId: input.eventId,
-        reason: input.reason,
-        caller: input.caller,
-        provider: input.provider,
-        model: input.model,
-        modelClass: input.modelClass,
-        inputSize: input.inputTokens,
-        outputSize: input.outputTokens,
-        estimatedCost: input.estimatedCost,
-        durationMs: 0,
-        cacheStatus: "miss",
-      },
-      "foreground",
-    );
-    return { booked: true, cost: input.estimatedCost };
+    if (!Number.isFinite(input.estimatedCost) || input.estimatedCost < 0) {
+      throw new Error("external result cost must be a finite non-negative number");
+    }
+    const reasonKind = input.reasonKind ?? "foreground";
+    const allowance = this.governor.reserve({
+      eventId: input.eventId,
+      reason: input.reason,
+      reasonKind,
+      modelClass: input.modelClass,
+      estimatedInputTokens: input.inputTokens,
+      estimatedOutputTokens: input.outputTokens,
+      estimatedCost: input.estimatedCost,
+    });
+    try {
+      const telemetryId = this.telemetry.record(
+        {
+          eventId: input.eventId,
+          reason: input.reason,
+          caller: input.caller,
+          provider: input.provider,
+          model: input.model,
+          modelClass: input.modelClass,
+          inputSize: input.inputTokens,
+          outputSize: input.outputTokens,
+          estimatedCost: input.estimatedCost,
+          durationMs: input.durationMs ?? 0,
+          cacheStatus: "miss",
+        },
+        reasonKind,
+      );
+      return { booked: true, cost: input.estimatedCost, telemetryId };
+    } finally {
+      allowance.release();
+    }
   }
 
   getProvider(name: string): Provider | undefined {

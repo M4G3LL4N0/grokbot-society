@@ -1,4 +1,7 @@
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { makeKernel } from "./helpers.ts";
@@ -231,6 +234,28 @@ describe("13 · legacy God migration", () => {
       h.kernel.close();
     }
   });
+
+  it("supports the operator migration command", () => {
+    const root = mkdtempSync(join(tmpdir(), "god-migrate-cli-"));
+    const file = join(root, "operator.db");
+    try {
+      const payload = JSON.stringify({ persons: [{ name: "CLI Migrant", biography: "durable fact" }] });
+      const report = execFileSync(
+        "pnpm",
+        ["society", "god", "migrate", payload, "--db", file],
+        { cwd: process.cwd(), encoding: "utf8", stdio: "pipe" },
+      );
+      expect(report).toContain('"persons": 1');
+      const people = execFileSync("pnpm", ["society", "people", "--db", file], {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        stdio: "pipe",
+      });
+      expect(people).toContain("CLI Migrant");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
 
 describe("13 · God v2 handoff contract", () => {
@@ -239,16 +264,30 @@ describe("13 · God v2 handoff contract", () => {
     const setup = handoff("SETUP.md");
     const contract = JSON.parse(handoff("CONTRACT.json")) as Record<string, unknown>;
     const health = handoff("HEALTHCHECK.md");
-    const migration = handoff("OLD_GOD_MIGRATION.md");
+    const migration = handoff("MIGRATION.md");
 
-    expect(prompt.toLowerCase()).toContain("one");
-    expect(prompt.toLowerCase()).toContain("society owns all state");
+    expect(prompt).toContain("premium social interface");
+    expect(prompt).toContain("Society runtime owns canonical state");
+    expect(prompt).toContain("Do not create GrokBots");
+    expect(prompt).toContain("Do not do repository or code work");
+    expect(prompt).toContain("Return control after each event");
     expect(prompt).not.toMatch(/\b(pnpm|npm|git|bash|readFile|exec|spawn)\b/i);
     expect(setup.toLowerCase()).toContain("dry");
-    expect(setup).toContain("--live");
+    expect(setup).not.toContain("--live");
     expect(contract).toMatchObject({
       identity: { agents: 1, persistsState: false },
-      limits: { maxCallsPerEvent: 1, recursionDepth: 0, backgroundModelCalls: 0, maxRetries: 0 },
+      execution: {
+        defaultMode: "dry",
+        liveMode: "explicit-operator-opt-in",
+        repositoryWork: false,
+      },
+      limits: {
+        maxCallsPerEvent: 1,
+        recursionDepth: 0,
+        backgroundModelCalls: 0,
+        maxRetries: 0,
+        maxSpeakers: 3,
+      },
     });
     expect(health.toLowerCase()).toContain("dry");
     expect(health.toLowerCase()).toContain("live");
@@ -258,5 +297,7 @@ describe("13 · God v2 handoff contract", () => {
     expect(migration.toLowerCase()).toContain("filler");
     expect(migration.toLowerCase()).toContain("logs");
     expect(migration.toLowerCase()).toContain("development history");
+    expect(migration).toContain("god migrate");
+    expect(migration).not.toMatch(/```bash|pnpm society|profile`/i);
   });
 });

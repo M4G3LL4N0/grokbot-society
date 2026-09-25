@@ -151,6 +151,7 @@ CREATE TABLE IF NOT EXISTS telemetry (
   estimated_cost REAL NOT NULL DEFAULT 0,
   duration_ms REAL NOT NULL DEFAULT 0,
   cache_status TEXT NOT NULL,
+  reason_kind TEXT NOT NULL DEFAULT 'foreground',
   created_at INTEGER NOT NULL
 );
 
@@ -204,6 +205,7 @@ CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(sess
 
 export class SocietyDB {
   readonly db: DatabaseSync;
+  private transactionDepth = 0;
 
   constructor(path = ":memory:") {
     this.db = new DatabaseSync(path);
@@ -212,6 +214,10 @@ export class SocietyDB {
       this.db.exec("PRAGMA foreign_keys = ON");
     }
     this.exec(SCHEMA);
+    const columns = this.db.prepare("PRAGMA table_info(telemetry)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "reason_kind")) {
+      this.db.exec("ALTER TABLE telemetry ADD COLUMN reason_kind TEXT NOT NULL DEFAULT 'foreground'");
+    }
   }
 
   exec(sql: string): void {
@@ -223,7 +229,9 @@ export class SocietyDB {
   }
 
   transaction<T>(fn: () => T): T {
+    if (this.transactionDepth > 0) return fn();
     this.db.exec("BEGIN");
+    this.transactionDepth = 1;
     try {
       const result = fn();
       this.db.exec("COMMIT");
@@ -231,6 +239,8 @@ export class SocietyDB {
     } catch (err) {
       this.db.exec("ROLLBACK");
       throw err;
+    } finally {
+      this.transactionDepth = 0;
     }
   }
 

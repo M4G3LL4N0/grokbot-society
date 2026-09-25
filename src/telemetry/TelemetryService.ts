@@ -27,22 +27,14 @@ export class TelemetryService {
   private recentStmt: ReturnType<SocietyDB["prepare"]>;
   private recentEventStmt: ReturnType<SocietyDB["prepare"]>;
 
-  /** In-memory call ledger for rapid budget checks (ms-resolution). */
-  private ledger: Array<{
-    at: number;
-    cost: number;
-    eventId: string | null;
-    reasonKind: "foreground" | "background" | null;
-  }> = [];
-
   constructor(
     private readonly db: SocietyDB,
     private readonly clock: Clock,
   ) {
     this.insert = db.prepare(
       `INSERT INTO telemetry (event_id, reason, caller, provider, model, model_class,
-        input_size, output_size, estimated_cost, duration_ms, cache_status, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        input_size, output_size, estimated_cost, duration_ms, cache_status, reason_kind, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     );
     this.byEventStmt = db.prepare("SELECT * FROM telemetry WHERE event_id = ?");
     this.recentStmt = db.prepare("SELECT * FROM telemetry ORDER BY id DESC LIMIT ?");
@@ -52,7 +44,7 @@ export class TelemetryService {
   }
 
   record(input: TelemetryInput, reasonKind: "foreground" | "background" | null = "foreground"): number {
-    this.insert.run(
+    const inserted = this.insert.run(
       input.eventId ?? null,
       input.reason ?? null,
       input.caller ?? null,
@@ -64,15 +56,10 @@ export class TelemetryService {
       input.estimatedCost,
       input.durationMs,
       input.cacheStatus,
+      reasonKind ?? "foreground",
       this.clock.now(),
     );
-    this.ledger.push({
-      at: this.clock.now(),
-      cost: input.estimatedCost,
-      eventId: input.eventId ?? null,
-      reasonKind,
-    });
-    return this.ledger.length;
+    return Number(inserted.lastInsertRowid);
   }
 
   countForEvent(eventId: string): number {
@@ -88,28 +75,35 @@ export class TelemetryService {
   }
 
   totalCalls(): number {
-    return this.ledger.length;
+    return Number((this.db.prepare("SELECT COUNT(*) AS n FROM telemetry").get() as { n: number }).n);
   }
 
   totalCost(): number {
-    return this.ledger.reduce((sum, l) => sum + l.cost, 0);
+    return Number(
+      (this.db.prepare("SELECT COALESCE(SUM(estimated_cost), 0) AS total FROM telemetry").get() as { total: number }).total,
+    );
   }
 
-  /** Calls within the last `windowMs` milliseconds. */
   callsSince(windowMs: number, now?: number): number {
     const at = now ?? this.clock.now();
-    return this.ledger.filter((l) => l.at >= at - windowMs).length;
+    return Number(
+      (this.db.prepare("SELECT COUNT(*) AS n FROM telemetry WHERE created_at >= ?").get(at - windowMs) as { n: number }).n,
+    );
   }
 
   costSince(windowMs: number, now?: number): number {
     const at = now ?? this.clock.now();
-    return this.ledger
-      .filter((l) => l.at >= at - windowMs)
-      .reduce((sum, l) => sum + l.cost, 0);
+    return Number(
+      (this.db
+        .prepare("SELECT COALESCE(SUM(estimated_cost), 0) AS total FROM telemetry WHERE created_at >= ?")
+        .get(at - windowMs) as { total: number }).total,
+    );
   }
 
   backgroundCalls(): number {
-    return this.ledger.filter((l) => l.reasonKind === "background").length;
+    return Number(
+      (this.db.prepare("SELECT COUNT(*) AS n FROM telemetry WHERE reason_kind = 'background'").get() as { n: number }).n,
+    );
   }
 
   recent(limit = 20): TelemetryEntry[] {

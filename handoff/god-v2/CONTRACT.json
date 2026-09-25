@@ -12,6 +12,12 @@
     "persistsState": false,
     "recursion": 0
   },
+  "execution": {
+    "defaultMode": "dry",
+    "liveMode": "explicit-operator-opt-in",
+    "repositoryWork": false,
+    "networkInferenceInDry": false
+  },
   "eventIn": {
     "description": "The ONLY thing God sends. Smallest useful input.",
     "type": "object",
@@ -95,7 +101,7 @@
           "properties": {
             "personId": { "type": "string" },
             "targetId": { "type": "string" },
-            "dim": { "enum": ["familiarity", "trust", "affection", "respect", "attraction", "comfort"] },
+            "dim": { "enum": ["familiarity", "trust", "affection", "respect", "attraction", "comfort", "shared_history", "intellectual_connection", "humor_compatibility", "reciprocity", "tension", "interaction_frequency"] },
             "delta": { "type": "number", "minimum": -0.1, "maximum": 0.1 }
           }
         }
@@ -124,7 +130,18 @@
           }
         }
       },
-      "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+      "usage": {
+        "type": "object",
+        "required": ["inputTokens", "outputTokens"],
+        "properties": {
+          "inputTokens": { "type": "number", "minimum": 0 },
+          "outputTokens": { "type": "number", "minimum": 0 },
+          "cachedTokens": { "type": "number", "minimum": 0 },
+          "reportedCost": { "type": "number", "minimum": 0 },
+          "latencyMs": { "type": "number", "minimum": 0 }
+        }
+      }
     }
   },
   "limits": {
@@ -132,6 +149,7 @@
     "recursionDepth": 0,
     "backgroundModelCalls": 0,
     "maxRetries": 0,
+    "maxSpeakers": 3,
     "maxActiveSpeakers": 3,
     "maxOutputTokens": 400,
     "maxRelationshipsPerPerson": 4,
@@ -152,10 +170,10 @@
   ],
   "costAccounting": {
     "recordedPerCall": [
-      "eventId", "timestamp", "reasonGrokRequired", "participants", "participantNames",
+      "eventId", "timestamp", "mode", "reasonGrokRequired", "participants", "participantNames",
       "roles", "circleId", "inputTokens", "outputTokens", "cachedTokens",
-      "model", "provider", "estimatedCost", "reportedCost", "latencyMs",
-      "resultStatus", "stateChanges", "missAnalysis"
+      "inputCharacters", "outputCharacters", "model", "provider", "estimatedCost", "reportedCost", "latencyMs",
+      "cacheStatus", "providerCallRecorded", "resultStatus", "stateChanges", "missAnalysis"
     ],
     "missAnalysis": [
       "looksDeterministic", "nearCacheable", "speakerCount",
@@ -170,6 +188,8 @@
     "result": "pnpm society god result '<resultJson>'",
     "usage": "pnpm society god usage",
     "benchmarks": "pnpm society god benchmarks [A-F]",
-    "compare": "pnpm society god compare <scenarioId>"
-  }
+    "compare": "pnpm society god compare <scenarioId>",
+    "migrate": "pnpm society god migrate <legacyFactsJson>"
+  },
+  "commandsAreOperatorOnly": true
 }

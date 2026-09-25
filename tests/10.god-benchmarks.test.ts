@@ -1,15 +1,19 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { makeKernel } from "./helpers.ts";
 import { SystemClock } from "../src/god/clock.ts";
 import { GodBridge, GOD_LIMITS } from "../src/godbridge/GodBridge.ts";
-import { BENCHMARKS, compareRoutes } from "../src/godbridge/benchmarks.ts";
+import { BENCHMARKS, compareRoutes, runBenchmarks } from "../src/godbridge/benchmarks.ts";
 import { buildKernelConfig } from "../src/god/config.ts";
 import { GodKernel } from "../src/god/GodKernel.ts";
 
 function freshKernel(): GodKernel {
   const k = new GodKernel({
-    config: buildKernelConfig({ dbPath: ":memory:" }),
+    config: buildKernelConfig({ dbPath: ":memory:" }, { sceneModelClass: "social.standard" }),
     overrides: { clock: new SystemClock() },
   });
   k.ensureSeeded();
@@ -84,6 +88,7 @@ describe("dry benchmark execution (zero cost)", () => {
     const out = await f.run(k, new GodBridge(k, new SystemClock(), "grok", true, "dry"));
     expect(out.events).toBeGreaterThanOrEqual(30);
     expect(out.notes.join(" ")).toContain("rollingMessageWindow");
+    expect(out.participantsPerEvent).toBeGreaterThan(0.5);
     k.close();
   });
 
@@ -140,6 +145,43 @@ describe("route comparison", () => {
     }
     k.close();
   });
+
+  it("runs every definition in an isolated dry kernel", async () => {
+    const outcomes = await runBenchmarks();
+    expect(outcomes.map((outcome) => outcome.id)).toEqual(["A", "B", "C", "D", "E", "F"]);
+    expect(outcomes.every((outcome) => outcome.mode === "dry" && outcome.estimatedCost === 0)).toBe(true);
+    expect(outcomes.every((outcome) => outcome.modelCalls === 0)).toBe(true);
+  });
+  it("enables the bounded dry handoff with the bridge flag", () => {
+    const root = mkdtempSync(join(tmpdir(), "god-cli-submit-"));
+    const file = join(root, "operator.db");
+    try {
+      const output = execFileSync(
+        "pnpm",
+        ["society", "god", "submit", '{"type":"USER_MESSAGE","text":"hello from the operator"}', "--bridge", "--db", file],
+        { cwd: process.cwd(), encoding: "utf8", stdio: "pipe" },
+      );
+      expect(output).toContain('"participants"');
+      expect(output).toContain('"constraints"');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("does not open the operator database for a benchmark command", () => {
+    const root = mkdtempSync(join(tmpdir(), "god-bench-cli-"));
+    const file = join(root, "operator.db");
+    try {
+      execFileSync("pnpm", ["society", "god", "benchmarks", "A", "--db", file], {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        stdio: "pipe",
+      });
+      expect(existsSync(file)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
 
 describe("limits are conservative", () => {

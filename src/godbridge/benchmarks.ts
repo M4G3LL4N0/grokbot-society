@@ -10,8 +10,11 @@
  * prove that dormant population does not change call counts.
  */
 
-import type { GodKernel } from "../god/GodKernel.ts";
-import type { Clock } from "../god/clock.ts";
+import { GodKernel } from "../god/GodKernel.ts";
+import { SystemClock, type Clock } from "../god/clock.ts";
+import { buildKernelConfig } from "../god/config.ts";
+import type { ModelClass } from "../god/types.ts";
+import { estimateCost } from "../telemetry/TelemetryService.ts";
 import { GodBridge, GOD_LIMITS } from "./GodBridge.ts";
 import type { CostClass } from "./types.ts";
 
@@ -209,11 +212,13 @@ export const BENCHMARKS: BenchmarkDefinition[] = [
     run: async (k, bridge) => {
       const before = k.stats();
       const beforeUsage = k.usage();
-      const circle = k.circles.list()[0]!;
-      for (let i = 0; i < 10; i += 1) {
-        await ask(bridge, `Message ${i + 1}: what do you think?`, circle.id);
-      }
-      return measure(k, bridge, "E", "dry", before, beforeUsage, ["bounded"], [
+       const circle = k.circles.list()[0]!;
+       const selected: string[] = [];
+       for (let i = 0; i < 10; i += 1) {
+         selected.push(...(await ask(bridge, `Message ${i + 1}: what do you think?`, circle.id)));
+       }
+       return measure(k, bridge, "E", "dry", before, beforeUsage, selected, [
+
         "10 scenes, each bounded by maxSpeakers + per-person memory limit",
         "per-scene context stays flat",
       ]);
@@ -232,14 +237,16 @@ export const BENCHMARKS: BenchmarkDefinition[] = [
       const before = k.stats();
       const beforeUsage = k.usage();
       const circle = k.circles.list()[0]!;
-      const members = k.persons.list(10).map((p) => p.id);
-      const session = k.sessionStart({ kind: "evening_social", circleId: circle.id, participantIds: members });
-      for (let i = 0; i < 30; i += 1) {
-        k.sessionAppend(session.id, { role: "user", text: `Turn ${i + 1}: thoughts?` });
-        await ask(bridge, `Turn ${i + 1}: thoughts?`, circle.id);
-      }
-      k.sessionEnd(session.id);
-      return measure(k, bridge, "F", "dry", before, beforeUsage, ["bounded"], [
+       const members = k.persons.list(10).map((p) => p.id);
+       const session = k.sessionStart({ kind: "evening_social", circleId: circle.id, participantIds: members });
+       const selected: string[] = [];
+       for (let i = 0; i < 30; i += 1) {
+         k.sessionAppend(session.id, { role: "user", text: `Turn ${i + 1}: thoughts?` });
+         selected.push(...(await ask(bridge, `Turn ${i + 1}: thoughts?`, circle.id)));
+       }
+       k.sessionEnd(session.id);
+       return measure(k, bridge, "F", "dry", before, beforeUsage, selected, [
+
         "30 turns inside one session",
         `rollingMessageWindow ${k.config.society.sessions.rollingMessageWindow}`,
         "context is re-derived per scene, never accumulated in the prompt",
@@ -248,7 +255,26 @@ export const BENCHMARKS: BenchmarkDefinition[] = [
   },
 ];
 
-/** Route comparison — same normalized event, different executors. */
+export async function runBenchmarks(only?: string): Promise<BenchmarkOutcome[]> {
+  const outcomes: BenchmarkOutcome[] = [];
+  for (const definition of BENCHMARKS) {
+    if (only && definition.id !== only) continue;
+    const kernel = new GodKernel({
+      config: buildKernelConfig({ dbPath: ":memory:" }, { sceneModelClass: "social.standard" }),
+      overrides: { clock: new SystemClock() },
+    });
+    try {
+      kernel.ensureSeeded();
+      definition.setup(kernel);
+      const bridge = new GodBridge(kernel, kernel.clock, "grok", true, "dry");
+      outcomes.push(await definition.run(kernel, bridge));
+    } finally {
+      kernel.close();
+    }
+  }
+  return outcomes;
+}
+
 export interface RouteComparison {
   route: string;
   qualityProxy: number;
@@ -275,18 +301,16 @@ export function compareRoutes(
 ): RouteComparisonResult {
   const event = { type: "USER_MESSAGE", text: "Dinner tonight?", circleId: kernel.circles.list()[0]?.id ?? null, participants: 3 };
   const jobs: RouteComparison[] = [];
-  for (const route of ["social.mock", "social.deterministic", "social.nano", "social.standard", "social.deep"]) {
-    const before = kernel.usage();
+  for (const route of ["social.mock", "social.deterministic", "social.nano", "social.standard", "social.deep"] as ModelClass[]) {
     const started = clock.now();
-    // deterministic route in every case; the comparison is of the COST PROFILE,
-    // not a live call. Live rows are produced by a separate manual run.
-    const bridge = new GodBridge(kernel, clock, route === "social.deep" ? "grok" : "grok");
     const inputTokens = 900;
-    const outputTokens = route === "social.mock" ? 80 : 220;
-    const cost =
-      route === "social.mock" || route === "social.deterministic"
-        ? 0
-        : Number((inputTokens * 0.000_005 + outputTokens * 0.000_02).toFixed(8));
+    const outputTokens = route === "social.mock" || route === "social.deterministic" ? 80 : 220;
+    const cost = Number(estimateCost(
+      route,
+      inputTokens,
+      outputTokens,
+      kernel.config.intelligence.costPer1kOutputTokens,
+    ).toFixed(8));
     jobs.push({
       route,
       qualityProxy: route === "social.mock" ? 0.25 : route === "social.deterministic" ? 0.4 : route === "social.nano" ? 0.62 : route === "social.standard" ? 0.82 : 0.94,
@@ -297,8 +321,6 @@ export function compareRoutes(
       structuredOutputValid: true,
       retries: 0,
     });
-    void before;
-    void bridge;
   }
   const cheapestUseful = jobs.find((j) => j.route === "social.nano")!;
   const best = jobs[jobs.length - 1]!;

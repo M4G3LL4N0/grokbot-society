@@ -44,7 +44,6 @@ const MOCK_CLASSES: ModelClass[] = [
  */
 export class BudgetGovernor {
   private inFlight = new Set<string>();
-  private backgroundCallsUsed = 0;
   private blockedCount = 0;
   private readonly killSwitchRef: () => boolean;
 
@@ -71,10 +70,10 @@ export class BudgetGovernor {
     void reason;
   }
 
-  /** Non-consuming preflight: would this reserve be allowed right now? */
-  canReserve(opts: Omit<ReserveOptions, "estimatedCost">): boolean {
+  canReserve(opts: Omit<ReserveOptions, "estimatedCost"> & { estimatedCost?: number }): boolean {
     try {
-      this.check({ estimatedCost: 0, ...opts });
+      const { estimatedCost = 0, ...rest } = opts;
+      this.check({ estimatedCost, ...rest });
       return true;
     } catch {
       return false;
@@ -84,9 +83,6 @@ export class BudgetGovernor {
   reserve(opts: ReserveOptions): Allowance {
     this.check(opts);
 
-    if (opts.reasonKind === "background") {
-      this.backgroundCallsUsed += 1;
-    }
     const eventKey = `${opts.eventId}:${opts.reason}`;
     this.inFlight.add(eventKey);
     let released = false;
@@ -129,7 +125,7 @@ export class BudgetGovernor {
     // Background model call ceiling (default 0).
     if (
       opts.reasonKind === "background" &&
-      this.backgroundCallsUsed >= this.limits.backgroundModelCalls
+      this.telemetry.backgroundCalls() >= this.limits.backgroundModelCalls
     ) {
       this.blockedCount += 1;
       throw new BudgetExceededError(
