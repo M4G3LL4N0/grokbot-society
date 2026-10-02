@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/M4G3LL4N0/grokbot-society/discussions
+    about: Questions, design discussion and Q&A belong in Discussions, not Issues.
