@@ -412,3 +412,103 @@ Run with `pnpm test` (vitest) and `pnpm typecheck` (tsc `--noEmit`).
 ## Disclaimer
 
 **GrokBot Society is an independent open-source project.** It is not affiliated with, endorsed by, or connected to xAI, Grok, Cursor, or any other company. "GrokBot" in this project refers to an optional internal inference route name only.
+
+<!-- TRILLIONX:presentation:begin -->
+
+### Animated surfaces
+
+Generated from this repository's own source tree: every count, route and module below was measured, not written by hand.
+
+#### Identity
+
+<picture>
+  <source media="(prefers-reduced-motion: reduce)" srcset="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/hero-reduced.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/hero-light.svg">
+  <img alt="Identity diagram for grokbot-society" src="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/hero.svg">
+</picture>
+
+#### Entry points
+
+<picture>
+  <source media="(prefers-reduced-motion: reduce)" srcset="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/terminal-reduced.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/terminal-light.svg">
+  <img alt="Entry points diagram for grokbot-society" src="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/terminal.svg">
+</picture>
+
+#### Modules
+
+<picture>
+  <source media="(prefers-reduced-motion: reduce)" srcset="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/architecture-reduced.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/architecture-light.svg">
+  <img alt="Modules diagram for grokbot-society" src="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/architecture.svg">
+</picture>
+
+#### Primitives
+
+<picture>
+  <source media="(prefers-reduced-motion: reduce)" srcset="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/state_machine-reduced.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/state_machine-light.svg">
+  <img alt="Primitives diagram for grokbot-society" src="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/state_machine.svg">
+</picture>
+
+#### Composition
+
+<picture>
+  <source media="(prefers-reduced-motion: reduce)" srcset="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/component_map-reduced.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/component_map-light.svg">
+  <img alt="Composition diagram for grokbot-society" src="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/component_map.svg">
+</picture>
+
+#### Build and tests
+
+<picture>
+  <source media="(prefers-reduced-motion: reduce)" srcset="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/build-reduced.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/build-light.svg">
+  <img alt="Build and tests diagram for grokbot-society" src="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/build.svg">
+</picture>
+
+#### Workflow
+
+<picture>
+  <source media="(prefers-reduced-motion: reduce)" srcset="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/workflow-reduced.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/workflow-light.svg">
+  <img alt="Workflow diagram for grokbot-society" src="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/workflow.svg">
+</picture>
+
+#### Domain
+
+<picture>
+  <source media="(prefers-reduced-motion: reduce)" srcset="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/domain-reduced.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/domain-light.svg">
+  <img alt="Domain diagram for grokbot-society" src="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/domain.svg">
+</picture>
+
+#### Identity object
+
+<picture>
+  <source media="(prefers-reduced-motion: reduce)" srcset="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/footer-reduced.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/footer-light.svg">
+  <img alt="Identity object diagram for grokbot-society" src="https://raw.githubusercontent.com/M4G3LL4N0/grokbot-society/main/.github-art/surfaces/footer.svg">
+</picture>
+
+<!-- TRILLIONX:presentation:end -->
+
+<!-- TRILLIONX:evidence:begin -->
+
+## What is measurable here
+
+Generated by `.github-art` from the source tree at publish time.
+
+| Signal | Value |
+| --- | --- |
+| HTTP routes | 0 |
+| Entry points | 13 |
+| Module roots | 2 |
+| Test files | 15 |
+| CI workflows | 1 |
+| Distinctive stack | scaffold only |
+| Status | LIVE |
+| Evidence confidence | E3 |
+| Animated surfaces | 9 |
+
+<!-- TRILLIONX:evidence:end -->
